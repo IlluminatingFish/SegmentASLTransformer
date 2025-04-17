@@ -60,7 +60,10 @@ def evaluate(model, dataloader, device):
     with torch.no_grad():
         for skel, label_idx, label_probs, preseg, targets in dataloader:
             skel, label_idx, label_probs, preseg, targets = [x.to(device) for x in (skel, label_idx, label_probs, preseg, targets)]
-            logits = model(skel, label_idx, label_probs, preseg)
+            
+            # ✅ fix here: unpack the tuple from model
+            logits, _ = model(skel, label_idx, label_probs, preseg)
+            
             preds = torch.argmax(logits, dim=-1).cpu()
             targets = targets.cpu()
             for p_seq, t_seq in zip(preds, targets):

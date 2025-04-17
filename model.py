@@ -2,61 +2,83 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+class CustomTransformerEncoderLayer(nn.TransformerEncoderLayer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.saved_attn_weights = None
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None):
+        src2, attn_weights = self.self_attn(
+            src, src, src,
+            attn_mask=src_mask,
+            key_padding_mask=src_key_padding_mask,
+            need_weights=True,
+            average_attn_weights=False  # 不平均头
+        )
+        # ✅ 保留梯度，不使用 .detach()
+        self.saved_attn_weights = attn_weights  # (B, num_heads, T, T)
+
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+        return src
+
+
 class TransformerSegmenter(nn.Module):
     def __init__(self, skeleton_dim, label_vocab_size, label_embed_dim, embed_dim, num_heads, num_layers, dropout=0.1, num_classes=2):
-        super(TransformerSegmenter, self).__init__()
+        super().__init__()
 
-        # 投影骨架特征
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+
         self.skel_proj = nn.Linear(skeleton_dim, embed_dim)
-
-        # 标签嵌入（可学习）
         self.label_embedding = nn.Embedding(label_vocab_size, label_embed_dim)
         self.label_proj = nn.Linear(label_embed_dim, embed_dim)
-
-        # 引入预分割结果的通道（1维）
         self.preseg_proj = nn.Linear(1, embed_dim)
 
-        # 可学习的位置编码
-        self.pos_embedding = nn.Parameter(torch.randn(1, 1024, embed_dim))  # 假设最多512帧
+        self.pos_embedding = nn.Parameter(torch.randn(1, 1024, embed_dim))  # [1, T, D]
 
-        # Transformer编码器
-        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dropout=dropout, batch_first=True)
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.encoder_layers = nn.ModuleList([
+            CustomTransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dropout=dropout, batch_first=True)
+            for _ in range(num_layers)
+        ])
 
-        # 输出层：逐帧2分类（是否为段内）
         self.classifier = nn.Linear(embed_dim, num_classes)
 
     def forward(self, skel_feats, label_indices, label_probs, preseg):
-        # skel_feats: [B, T, skeleton_dim]
-        # label_indices: [B, T] (int64)
-        # label_probs: [B, T] (float, 与索引一一对应)
-        # preseg: [B, T] (float or int), 预分割结果标签（0/1）
-
         B, T, _ = skel_feats.size()
 
-        # 1. 处理骨架特征
-        skel_embed = self.skel_proj(skel_feats)  # [B, T, embed_dim]
+        # 骨架特征编码
+        skel_embed = self.skel_proj(skel_feats)
 
-        # 2. 处理标签嵌入并乘以概率
-        # label_embeds = self.label_embedding(label_indices)  # [B, T, label_embed_dim]
-        # label_embeds = label_embeds * label_probs.unsqueeze(-1)  # 广播概率乘权重
-        # label_embed_proj = self.label_proj(label_embeds)  # [B, T, embed_dim]
+        # 可选：label embedding + prob（暂时未使用）
+        # label_embed = self.label_embedding(label_indices)
+        # label_embed = self.label_proj(label_embed * label_probs.unsqueeze(-1))
+        # skel_embed += label_embed
 
-        # 3. 处理预分割嵌入
-        preseg = preseg.unsqueeze(-1).float()  # [B, T, 1]
-        preseg_embed = self.preseg_proj(preseg)  # [B, T, embed_dim]
+        # preseg 特征
+        preseg = preseg.unsqueeze(-1).float()
+        preseg_embed = self.preseg_proj(preseg)
 
-        # 4. 相加融合
-        fused = skel_embed + preseg_embed  # [B, T, embed_dim]
+        fused = skel_embed + preseg_embed
 
-        # 5. 加上位置编码
+        # 添加位置编码
         if T > self.pos_embedding.size(1):
-            raise ValueError("Input sequence length exceeds maximum position embedding length.")
-        pos_encoded = fused + self.pos_embedding[:, :T, :]  # [B, T, embed_dim]
+            raise ValueError("Input sequence too long")
+        pos_encoded = fused + self.pos_embedding[:, :T, :]
 
-        # 6. Transformer 编码
-        encoded = self.encoder(pos_encoded)  # [B, T, embed_dim]
+        out = pos_encoded
+        attention_scores = None
 
-        # 7. Frame-wise 分类
-        logits = self.classifier(encoded)  # [B, T, num_classes]
-        return logits
+        for i, layer in enumerate(self.encoder_layers):
+            out = layer(out)
+            if i == self.num_layers - 1:
+                attn = layer.saved_attn_weights  # shape: (B, H, T, T)
+                attention_scores = attn.mean(dim=1).mean(dim=1)  # → (B, T)
+
+        logits = self.classifier(out)  # shape: [B, T, num_classes]
+        return logits, attention_scores
