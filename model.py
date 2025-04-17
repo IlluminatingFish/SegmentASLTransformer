@@ -16,7 +16,7 @@ class CustomTransformerEncoderLayer(nn.TransformerEncoderLayer):
             need_weights=True,
             average_attn_weights=False  # 不平均头
         )
-        # ✅ 保留梯度，不使用 .detach()
+        # 保留梯度，不使用 .detach()
         self.saved_attn_weights = attn_weights  # (B, num_heads, T, T)
 
         src = src + self.dropout1(src2)
