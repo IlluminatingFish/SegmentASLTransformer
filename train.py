@@ -194,9 +194,9 @@ def main():
         best_model_path = get_best_model_path(save_dir)
         model.load_state_dict(torch.load(best_model_path, map_location=device))
         best_f1 = float(re.search(r'f1_(\d\.\d+).pth', best_model_path).group(1))
-        print(f"✅ Resuming training from best model: {best_model_path} (F1 = {best_f1:.4f})")
+        print(f"Resuming training from best model: {best_model_path} (F1 = {best_f1:.4f})")
     except Exception as e:
-        print(f"🔁 No previous model found, starting fresh. ({str(e)})")
+        print(f"No previous model found, starting fresh. ({str(e)})")
 
     # === Training Loop ===
     for epoch in range(100):
@@ -230,9 +230,9 @@ def main():
                     continue
 
             torch.save(model.state_dict(), model_path)
-            print(f"📦 Saved better model to: {model_path}")
+            print(f"Saved better model to: {model_path}")
 
-    print("✅ Training complete.")
+    print("Training complete.")
 
 if __name__ == "__main__":
     main()
